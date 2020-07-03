@@ -2,6 +2,8 @@ import itertools
 from sklearn.neighbors import KDTree
 import numpy as np
 from sklearn.model_selection import train_test_split
+from evolutionary_search import maximize
+from tqdm import tqdm
 
 class SAFE():
     """ per SAmple Feature Elimination """
@@ -30,14 +32,23 @@ class SAFE():
         self._generate_combination(self.mode)
         self.model = model
 
-        for i,j in enumerate(X_train.values):
-            candidates = []
-            for p in self.combinations:
-                sample = np.multiply(p, j)
-                loss = sum(abs(model.predict(np.array([sample,]))[0] - y_train.values[i]))
-                candidates.append(loss)
-            self.X_train_fs[i,:] = j
-            self.y_train_fs[i,:] = self.combinations[np.array(candidates).argmin()]
+        
+        if self.mode == 'genetic':
+            param_grid = {'combination': self.combinations}
+            for i,j in enumerate(tqdm(X_train.values)):
+                args = {'data': j, 'label':y_train.values[i]}
+                best_params, _, _, _, _ = maximize(self._combination_search, param_grid, args, verbose=False)
+                self.X_train_fs[i,:] = j
+                self.y_train_fs[i,:] = best_params['combination']
+        else:
+            for i,j in enumerate(tqdm(X_train.values)):
+                candidates = []
+                for p in self.combinations:
+                    sample = np.multiply(p, j)
+                    loss = sum(abs(model.predict(np.array([sample,]))[0] - y_train.values[i]))
+                    candidates.append(loss)
+                self.X_train_fs[i,:] = j
+                self.y_train_fs[i,:] = self.combinations[np.array(candidates).argmin()]
 
     def get_selection(self, test_data):
         self.tree = KDTree(self.X_train_fs)
@@ -56,7 +67,7 @@ class SAFE():
             raise "SAFE model not trained! Use the fit() mnethod for training."
 
     def _generate_combination(self, mode):
-        if mode == 'all':
+        if mode == 'all' or mode == 'genetic':
             self.combinations =  list(itertools.product([0, 1], repeat=self.n_features))
         if mode == 'one-by-one':
             self.combinations = np.ones((self.n_features+1, self.n_features))
@@ -64,14 +75,16 @@ class SAFE():
                 self.combinations[i,i] = 0
         if mode == 'random':
             pass
-        if mode == 'genetic':
-            pass
 
         # TODO: sample based on self.factor
 
     def clean_data(self, data):
         y = self.get_selection(data)
         return np.multiply(X_test, y)
+
+    def _combination_search(self, combination, data, label):
+        sample = np.multiply(data, combination)
+        return 1/(sum(abs(self.model.predict(np.array([sample,]))[0] - label)))
 
     def get_accuracy(self, data, labels):
 
