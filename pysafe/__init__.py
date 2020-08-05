@@ -8,95 +8,135 @@ from tqdm import tqdm
 class SAFE():
     """ per SAmple Feature Elimination """
 
-    def __init__(self, mode='all', factor=1, n_points=None, random_state=None):
+    def __init__(self, combinations_mode='all', n_combinations=10, n_points=None, random_state=None):
 
         self.n_features = None
-        self.mode = mode
+        self.combinations_mode = combinations_mode
+        self.algorithm = None
         self.combinations = None
         self.tree = None
-        self.X_train_fs = None
-        self.y_train_fs = None
+        self.X = None
+        self.y_better = None
+        self.y_worst = None
         self.model = None
         self.n_points = n_points
         self.random_state = random_state
-        self.factor = factor
+        self.n_combinations = n_combinations
+        self.tree = None
+        self.learner = None
 
-    def fit(self, model, X_train, y_train):
+    def fit(self, model, X, y):
+
+        [rows, self.n_features] = X.shape
 
         if self.n_points is not None:
-            X_train, _, y_train, _ = train_test_split(X_train, y_train, train_size=self.n_points/X_train.shape[0], random_state=self.random_state, stratify=y_train)
-
-        self.X_train_fs = np.zeros(X_train.shape)
-        self.y_train_fs = np.zeros(X_train.shape)
-        self.n_features = self.X_train_fs.shape[1]
-        self._generate_combination(self.mode)
+            X, _, y, _ = train_test_split(X, y, train_size=self.n_points/rows, random_state=self.random_state, stratify=y)
+        
+        self.X = np.zeros((rows, self.n_features))
+        self.y_better = np.zeros((rows, self.n_features))
+        self.y_worst = np.zeros((rows, self.n_features))
+        self._generate_combination()
         self.model = model
 
+        losses = np.empty((rows, len(self.combinations)))
         
-        if self.mode == 'genetic':
+        # TODO migrate this also
+        if self.combinations_mode == 'genetic':
             param_grid = {'combination': self.combinations}
-            for i,j in enumerate(tqdm(X_train.values)):
+            for i,j in enumerate(tqdm(X)):
                 args = {'data': j, 'label':y_train.values[i]}
-                best_params, _, _, _, _ = maximize(self._combination_search, param_grid, args, verbose=False)
+                best_params, _, _, _, _ = maximize(self.__combination_search, param_grid, args, verbose=False)
                 self.X_train_fs[i,:] = j
                 self.y_train_fs[i,:] = best_params['combination']
         else:
-            for i,j in enumerate(tqdm(X_train.values)):
-                candidates = []
-                for p in self.combinations:
-                    sample = np.multiply(p, j)
-                    loss = sum(abs(model.predict(np.array([sample,]))[0] - y_train.values[i]))
-                    candidates.append(loss)
-                self.X_train_fs[i,:] = j
-                self.y_train_fs[i,:] = self.combinations[np.array(candidates).argmin()]
+            for index, p in enumerate(tqdm(self.combinations)):
+                losses[:, index] = abs(self.model.predict(np.multiply(p, X)).flatten() - y)
+        
+            self.y_worst = self.combinations[losses.argmax(axis=1)]
+            self.y_better = self.combinations[losses.argmin(axis=1)]
 
-    def get_selection(self, test_data):
-        self.tree = KDTree(self.X_train_fs)
-        _, ind = self.tree.query(test_data, k=1)
-        return self.y_train_fs[ind.flatten()]
+    def learn(self, algorithm='knn', aim='worst', learner=None, train=False):
+        self.y = self.y_better if aim == 'better' else self.y_worst
+        self.algorithm = algorithm
+        self.learner = learner if learner else None
+        if self.algorithm == 'knn':
+            if not learner:
+                self.learner = KDTree(self.X)
+        if self.algorithm == 'ann':
+            self._ann(train)
+        return self.learner
+
+    def get_selection(self, data):
+
+        if self.algorithm == 'knn':
+            _, ind = self.learner.query(data, k=1)
+            return self.y[ind.flatten()]
+        if self.algorithm == 'ann':
+            return self.learner.predict(data).round()
 
     def get_importance(self, data=None):
         if data is not None:
             y = self.get_selection(data)
         else:
-            y = self.y_train_fs
+            y = self.y
 
         try:
             return np.mean(y, 0)/np.sum(np.mean(y, 0))*100
         except:
             raise "SAFE model not trained! Use the fit() mnethod for training."
 
-    def _generate_combination(self, mode):
-        if mode == 'all' or mode == 'genetic':
+    def _generate_combination(self):
+        if self.combinations_mode == 'all' or self.combinations_mode == 'genetic':
             self.combinations =  list(itertools.product([0, 1], repeat=self.n_features))
-        if mode == 'one-by-one':
+        if self.combinations_mode == 'one-by-one':
             self.combinations = np.ones((self.n_features+1, self.n_features))
             for i in range(self.n_features):
                 self.combinations[i,i] = 0
-        if mode == 'random':
-            pass
-
-        # TODO: sample based on self.factor
+        if self.combinations_mode == 'random':
+            self.combinations = list(itertools.product([0, 1], repeat=self.n_features))
+            self.combinations =  random.sample(self.combinations, min(self.n_combinations, len(self.combinations)))
 
     def clean_data(self, data):
-        y = self.get_selection(data)
-        return np.multiply(X_test, y)
+        return np.multiply(data, self.get_selection(data))
 
-    def _combination_search(self, combination, data, label):
+    def __combination_search(self, combination, data, label):
         sample = np.multiply(data, combination)
         return 1/(sum(abs(self.model.predict(np.array([sample,]))[0] - label)))
 
-    def get_accuracy(self, data, labels):
+    def _ann(self, train):
 
-        original = data
-        cleaned = self.clean_data(data)
-
-        original_predictions = self.model.predict_classes(original)
-        cleaned_predictions = self.model.predict_classes(cleaned)
+        if not self.learner:
+            self.learner = Sequential()
+            self.learner.add(Dense(64, input_dim=self.n_features, activation='relu'))
+            self.learner.add(Dense(64, activation='relu'))
+            self.learner.add(Dense(64, activation='relu'))
+            self.learner.add(Dense(self.n_features, activation='sigmoid'))
+            self.learner.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+            self.learner.fit(self.X, self.y, epochs=2, batch_size=16)
+            return
         
+        if train:
+            self.learner.fit(self.X, self.y, epochs=128, batch_size=8)
+        
+    def _get_clean(self, data):
+        return self.model.predict_classes(data), self.model.predict_classes(self.clean_data(data))
+    
+    def get_accuracy(self, data, labels):
+        original_predictions, cleaned_predictions = self._get_clean(data)
+        
+        # multiclass
         try:
             print('Accuracy before: {}'.format(accuracy_score(np.argmax(labels, 1), original_predictions)))
-            print('Accuracy after: {}'.format(accuracy_score(np.argmax(y_test, 1), cleaned_predictions)))
+            print('Accuracy after: {}'.format(accuracy_score(np.argmax(labels, 1), cleaned_predictions)))
+        # binary
         except:
             print('Accuracy before: {}'.format(accuracy_score(labels, original_predictions)))
-            print('Accuracy after: {}'.format(accuracy_score(y_test, cleaned_predictions)))
+            print('Accuracy after: {}'.format(accuracy_score(labels, cleaned_predictions)))
+        
+    def behaviour(self, data):
+        return self.model.predict(data), self.model.predict(self.clean_data(data))
+    
+    def get_candidates(self, data, threshold=0.9):
+        original_predictions, cleaned_predictions = self.behaviour(data)
+        displacement = original_predictions - cleaned_predictions
+        return [j for (i,j) in zip(displacement,list(range(len(displacement)))) if i >= threshold] 
