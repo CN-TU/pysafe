@@ -18,6 +18,8 @@ class SAFE():
         self.X = None
         self.y_better = None
         self.y_worst = None
+        self.y = None
+        self.aim = None
         self.model = None
         self.n_points = n_points
         self.random_state = random_state
@@ -25,40 +27,55 @@ class SAFE():
         self.tree = None
         self.learner = None
 
-    def fit(self, model, X, y):
-
+    def scan(self, model, X, y, aim='worst'):
+        
+        if not isinstance(X,np.ndarray):
+            X = X.values
+        if not isinstance(y,np.ndarray):
+            y = y.values
+        
         [rows, self.n_features] = X.shape
 
         if self.n_points is not None:
             X, _, y, _ = train_test_split(X, y, train_size=self.n_points/rows, random_state=self.random_state, stratify=y)
         
-        self.X = np.zeros((rows, self.n_features))
+        self.X = X
         self.y_better = np.zeros((rows, self.n_features))
         self.y_worst = np.zeros((rows, self.n_features))
         self._generate_combination()
         self.model = model
-
-        losses = np.empty((rows, len(self.combinations)))
+        self.aim = aim
         
         # TODO migrate this also
         if self.combinations_mode == 'genetic':
             param_grid = {'combination': self.combinations}
             for i,j in enumerate(tqdm(X)):
                 args = {'data': j, 'label':y_train.values[i]}
-                best_params, _, _, _, _ = maximize(self.__combination_search, param_grid, args, verbose=False)
+                best_params, _, _, _, _ = maximize(self.__combination_search_genetic, param_grid, args, verbose=False)
                 self.X_train_fs[i,:] = j
                 self.y_train_fs[i,:] = best_params['combination']
+                
+        elif self.combinations_mode == 'forward_selection':
+            if self.aim == 'better':
+                for i,j in enumerate(tqdm(self.X)):
+                    self.y_better[i,:] = self.__combination_search_forward_selection_min(j, y[i])
+            else:
+                for i,j in enumerate(tqdm(self.X)):
+                    self.y_worst[i,:] = self.__combination_search_forward_selection_max(j, y[i])
         else:
+            losses = np.zeros((rows, self.combinations.shape[0]))
             for index, p in enumerate(tqdm(self.combinations)):
-                losses[:, index] = abs(self.model.predict(np.multiply(p, X)).flatten() - y)
+                losses[:, index] = abs(self.model.predict(np.multiply(p, self.X)).flatten() - y)
         
             self.y_worst = self.combinations[losses.argmax(axis=1)]
             self.y_better = self.combinations[losses.argmin(axis=1)]
-
+        
     def learn(self, algorithm='knn', aim='worst', learner=None, train=False):
-        self.y = self.y_better if aim == 'better' else self.y_worst
+        self.aim = aim if not self.aim else self.aim
+        self.y = self.y_better if self.aim == 'better' else self.y_worst
         self.algorithm = algorithm
         self.learner = learner if learner else None
+        
         if self.algorithm == 'knn':
             if not learner:
                 self.learner = KDTree(self.X)
@@ -74,35 +91,83 @@ class SAFE():
         if self.algorithm == 'ann':
             return self.learner.predict(data).round()
 
-    def get_importance(self, data=None):
+    def get_robustness(self, data=None):
         if data is not None:
             y = self.get_selection(data)
+            mean = np.mean(y, 0)
+            return {'robustness': mean/np.sum(mean)*100}
         else:
-            y = self.y
+            mean1 = np.mean(self.y_better, 0)
+            mean2 = np.mean(self.y_worst, 0)
+            return {'robustness_better': mean1/np.sum(mean1)*100,
+                    'robustness_worst': mean2/np.sum(mean2)*100}
 
-        try:
-            return np.mean(y, 0)/np.sum(np.mean(y, 0))*100
-        except:
-            raise "SAFE model not trained! Use the fit() mnethod for training."
+
 
     def _generate_combination(self):
         if self.combinations_mode == 'all' or self.combinations_mode == 'genetic':
-            self.combinations =  list(itertools.product([0, 1], repeat=self.n_features))
+            self.combinations =  np.flip(np.array(list(itertools.product([0, 1], repeat=self.n_features))))
         if self.combinations_mode == 'one-by-one':
             self.combinations = np.ones((self.n_features+1, self.n_features))
-            for i in range(self.n_features):
+            for i in range(1, self.n_features):
                 self.combinations[i,i] = 0
         if self.combinations_mode == 'random':
-            self.combinations = list(itertools.product([0, 1], repeat=self.n_features))
+            self.combinations = np.array(list(itertools.product([0, 1], repeat=self.n_features)))
             self.combinations =  random.sample(self.combinations, min(self.n_combinations, len(self.combinations)))
 
     def clean_data(self, data):
         return np.multiply(data, self.get_selection(data))
 
-    def __combination_search(self, combination, data, label):
+    def __combination_search_genetic(self, combination, data, label):
         sample = np.multiply(data, combination)
         return 1/(sum(abs(self.model.predict(np.array([sample,]))[0] - label)))
-
+    
+    def __combination_search_forward_selection_min(self, data, label):
+        
+        best_combination = np.ones(self.n_features)
+        best_loss = abs(self.model.predict(np.array([np.multiply(data, best_combination)])) - label)
+        for _ in range(self.n_features):
+            combinations = []
+            losses = []
+            for i in range(self.n_features):
+                current_combination = best_combination.copy()
+                if current_combination[i] != 0:
+                    current_combination[i] = 0
+                    #print(current_combiantion)
+                    combinations.append(current_combination)
+                    losses.append(abs(self.model.predict(np.array([np.multiply(data, current_combination)])) - label))
+            current_loss = min(losses)
+            #print('best loss {} best combination {} | current loss {} current combination {}'.format(best_loss, best_combination, current_loss, current_combination))
+            if current_loss < best_loss:
+                best_combination = combinations[losses.index(current_loss)]
+                best_loss = current_loss
+            else:
+                return best_combination
+        return best_combination
+            
+    def __combination_search_forward_selection_max(self, data, label):
+        
+        best_combination = np.ones(self.n_features)
+        best_loss = abs(self.model.predict(np.array([np.multiply(data, best_combination)])) - label)
+        for _ in range(self.n_features):
+            combinations = []
+            losses = []
+            for i in range(self.n_features):
+                current_combination = best_combination.copy()
+                if current_combination[i] != 0:
+                    current_combination[i] = 0
+                    #print(current_combiantion)
+                    combinations.append(current_combination)
+                    losses.append(abs(self.model.predict(np.array([np.multiply(data, current_combination)])) - label))
+            current_loss = max(losses)
+            #print('best loss {} best combination {} | current loss {} current combination {}'.format(best_loss, best_combination, current_loss, current_combination))
+            if current_loss > best_loss:
+                best_combination = combinations[losses.index(current_loss)]
+                best_loss = current_loss
+            else:
+                return best_combination
+        return best_combination
+            
     def _ann(self, train):
 
         if not self.learner:
@@ -133,7 +198,7 @@ class SAFE():
             print('Accuracy before: {}'.format(accuracy_score(labels, original_predictions)))
             print('Accuracy after: {}'.format(accuracy_score(labels, cleaned_predictions)))
         
-    def behaviour(self, data):
+    def get_behaviour(self, data):
         return self.model.predict(data), self.model.predict(self.clean_data(data))
     
     def get_candidates(self, data, threshold=0.9):
