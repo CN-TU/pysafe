@@ -1,5 +1,6 @@
 # pysafe
 Contact: Fares Meghdouri - fares.meghdouri@tuwien.ac.at
+
 Python implementation of the per-SAmple Feature Elimination algorithm
 
 ## Installation
@@ -86,7 +87,7 @@ safe_model.get_behaviour(data=my_data_sample)
 # this will yield the prediction before and after SAFE
 ```
 
-### Get Candidates Adversarial Saamples
+### Get Adversarial Sample Candidates
 ```python
 # get all candidates in a dataset that can chnage their prediction by a value higher than a threshold (0.9)
 safe_model.get_candidates(data=my_dataset, threshold=0.9)
